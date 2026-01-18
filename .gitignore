@@ -1,0 +1,41 @@
+# Common
+node_modules/
+.DS_Store
+*.log
+.env
+.env.*
+dist/
+build/
+.cache/
+
+# Frontend (Next.js)
+frontend/.next/
+frontend/out/
+frontend/public/uploads/
+frontend/.next-env.d.ts
+
+# Backend (Node.js)
+backend/dist/
+backend/*.db
+backend/*.sqlite
+backend/uploads/
+
+# AI Service (Python)
+ai-service/__pycache__/
+ai-service/*.py[cod]
+ai-service/*$py.class
+ai-service/venv/
+ai-service/.venv/
+ai-service/env/
+ai-service/.env
+ai-service/data/
+ai-service/models/
+ai-service/.pytest_cache/
+ai-service/.coverage
+ai-service/htmlcov/
+
+# Docker
+.docker/
+docker-compose.override.yml
+
+docs/**

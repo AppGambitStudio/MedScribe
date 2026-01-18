@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+python-multipart
+torch
+pydicom
+pillow
+opencv-python-headless
+git+https://github.com/huggingface/transformers.git
+accelerate>=0.26.0
+soundfile
+librosa
+numpy
+huggingface-hub
+sentencepiece
+protobuf
