@@ -1,6 +1,6 @@
 # 🩺 MedScribe: Local Multimodal AI Clinical Assistant
 
-MedScribe is a high-performance, local-first clinical assistant designed for HIPAA-compliant patient encounter analysis. It leverages the latest Google Gemma 3 family model, MedGemma 1.5, to analyze voice transcripts, clinical notes, and medical imaging (DICOM/X-ray) natively.
+MedScribe is a local-first clinical assistant designed for HIPAA-compliant patient encounter analysis. It leverages the latest Google Gemma 3 family model, MedGemma 1.5 with MedASR, to analyze audio transcripts, clinical notes, and medical imaging (DICOM/X-ray) natively.
 
 ## 🏗️ Architecture
 
