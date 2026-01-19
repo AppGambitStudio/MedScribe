@@ -8,6 +8,7 @@ export class Analysis extends Model {
     public differential!: any; // JSON structure for differential
     public plan!: any; // JSON structure for plan
     public visualFindings?: string[]; // JSON structure for interpreted image findings
+    public status!: 'pending' | 'processing' | 'completed' | 'failed';
     public finalNote?: string;
     public createdAt!: Date;
     public updatedAt!: Date;
@@ -36,6 +37,11 @@ Analysis.init(
         visualFindings: {
             type: DataTypes.JSONB,
             allowNull: true,
+        },
+        status: {
+            type: DataTypes.ENUM('pending', 'processing', 'completed', 'failed'),
+            defaultValue: 'pending',
+            allowNull: false,
         },
         finalNote: {
             type: DataTypes.TEXT,

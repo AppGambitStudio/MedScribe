@@ -6,7 +6,7 @@ import { v4 as uuidv4 } from 'uuid';
 
 const router = Router();
 
-// Trigger Analysis
+// Trigger Analysis (Async / Non-blocking)
 router.post('/:encounterId', async (req, res) => {
     try {
         const { encounterId } = req.params;
@@ -16,43 +16,72 @@ router.post('/:encounterId', async (req, res) => {
             return res.status(404).json({ error: 'Encounter not found' });
         }
 
+        // Check if analysis already exists
+        let analysis = await Analysis.findOne({ where: { encounterId } });
+
+        if (analysis && (analysis.status === 'processing' || analysis.status === 'completed')) {
+            return res.json(analysis);
+        }
+
+        if (!analysis) {
+            analysis = await Analysis.create({
+                id: uuidv4(),
+                encounterId: encounterId,
+                status: 'processing'
+            });
+        } else {
+            analysis.status = 'processing';
+            await analysis.save();
+        }
+
         encounter.status = 'analyzing';
         await encounter.save();
 
-        // Simulate async processing (or await if fast)
-        // For MVP, we await.
+        // Trigger background processing
+        (async () => {
+            try {
+                console.log(`[Background] Starting analysis for encounter: ${encounterId}`);
 
-        let transcript = "";
-        if (encounter.audioPath) {
-            transcript = await aiService.transcribe(encounter.audioPath);
-            encounter.transcript = transcript;
-            await encounter.save();
-        }
+                let transcript = encounter.transcript || "";
+                if (encounter.audioPath && !transcript) {
+                    transcript = await aiService.transcribe(encounter.audioPath);
+                    encounter.transcript = transcript;
+                    await encounter.save();
+                }
 
-        const result = await aiService.analyzeEncounter(
-            encounterId,
-            transcript,
-            encounter.textNotes,
-            encounter.clinicalFilePaths || []
-        );
+                const result = await aiService.analyzeEncounter(
+                    encounterId,
+                    transcript,
+                    encounter.textNotes,
+                    encounter.clinicalFilePaths || []
+                );
 
-        const analysis = await Analysis.create({
-            id: uuidv4(),
-            encounterId: encounterId,
-            differential: result.differential,
-            plan: result.plan,
-            visualFindings: result.visualFindings,
-            status: 'completed'
-        });
+                analysis!.differential = result.differential;
+                analysis!.plan = result.plan;
+                analysis!.visualFindings = result.visualFindings;
+                analysis!.status = 'completed';
+                await analysis!.save();
 
-        encounter.status = 'review';
-        await encounter.save();
+                encounter.status = 'review';
+                await encounter.save();
 
+                console.log(`[Background] Analysis completed for encounter: ${encounterId}`);
+            } catch (bgError) {
+                console.error(`[Background] Analysis failed for encounter: ${encounterId}`, bgError);
+                analysis!.status = 'failed';
+                await analysis!.save();
+
+                encounter.status = 'pending'; // Fallback to pending so user can retry
+                await encounter.save();
+            }
+        })();
+
+        // Return the pending/processing analysis object immediately
         res.json(analysis);
 
     } catch (error) {
         console.error(error);
-        res.status(500).json({ error: 'Analysis failed' });
+        res.status(500).json({ error: 'Failed to initiate analysis' });
     }
 });
 

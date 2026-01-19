@@ -38,44 +38,82 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
     const [noteType, setNoteType] = useState("SOAP Note");
     const [finalNote, setFinalNote] = useState("");
 
-    useEffect(() => {
-        const fetchData = async () => {
-            try {
-                const encRes = await api.get(`/encounters/${id}`);
-                setEncounter(encRes.data);
+    const fetchData = async () => {
+        try {
+            const encRes = await api.get(`/encounters/${id}`);
+            setEncounter(encRes.data);
 
-                try {
-                    const analysisRes = await api.get(`/analysis/${id}`);
-                    if (analysisRes.data) {
-                        setAnalysis(analysisRes.data);
-                        setDifferential(analysisRes.data.differential || []);
-                        setPlanText(JSON.stringify(analysisRes.data.plan, null, 2));
-                        setStep2Complete(true); // Assume if analysis exists, we can proceed
-                    }
-                } catch (e) {
-                    // No analysis yet
+            const analysisRes = await api.get(`/analysis/${id}`);
+            if (analysisRes.data) {
+                setAnalysis(analysisRes.data);
+                if (analysisRes.data.status === 'completed') {
+                    setDifferential(analysisRes.data.differential || []);
+                    setPlanText(JSON.stringify(analysisRes.data.plan, null, 2));
+                    setStep2Complete(true);
                 }
-            } catch (error) {
-                toast.error("Failed to load data");
-            } finally {
-                setLoading(false);
             }
-        };
+        } catch (error) {
+            // Handle if analysis doesn't exist yet (404)
+            if ((error as any).response?.status !== 404) {
+                toast.error("Failed to load data");
+            }
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    useEffect(() => {
         fetchData();
     }, [id]);
+
+    // Polling logic for async analysis
+    useEffect(() => {
+        let interval: NodeJS.Timeout;
+
+        if (analysis?.status === 'processing' || analyzing) {
+            interval = setInterval(async () => {
+                try {
+                    const res = await api.get(`/analysis/${id}`);
+                    if (res.data) {
+                        setAnalysis(res.data);
+                        if (res.data.status === 'completed') {
+                            setDifferential(res.data.differential || []);
+                            setPlanText(JSON.stringify(res.data.plan, null, 2));
+                            setStep2Complete(true);
+                            setAnalyzing(false);
+                            toast.success("Analysis complete!");
+                        } else if (res.data.status === 'failed') {
+                            setAnalyzing(false);
+                            toast.error("Analysis failed in background");
+                        }
+                    }
+                } catch (e) {
+                    console.error("Polling error", e);
+                }
+            }, 3000); // Poll every 3 seconds
+        }
+
+        return () => {
+            if (interval) clearInterval(interval);
+        };
+    }, [id, analysis?.status, analyzing]);
 
     const runAnalysis = async () => {
         setAnalyzing(true);
         try {
             const res = await api.post(`/analysis/${id}`);
             setAnalysis(res.data);
-            setDifferential(res.data.differential || []);
-            setPlanText(JSON.stringify(res.data.plan, null, 2));
-            toast.success("Analysis complete");
-            setStep2Complete(true);
+            if (res.data.status === 'completed') {
+                setDifferential(res.data.differential || []);
+                setPlanText(JSON.stringify(res.data.plan, null, 2));
+                toast.success("Analysis complete");
+                setStep2Complete(true);
+                setAnalyzing(false);
+            } else {
+                toast.success("Analysis started in background...");
+            }
         } catch (error) {
-            toast.error("Analysis failed");
-        } finally {
+            toast.error("Failed to start analysis");
             setAnalyzing(false);
         }
     };
@@ -247,12 +285,32 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
                                 </Button>
                             </div>
                         )}
-                        {analyzing && (
-                            <div className="flex items-center justify-center py-6 text-slate-500 gap-2">
-                                <Loader2 className="animate-spin h-5 w-5" /> Analyzing clinical data...
+                        {analysis?.status === 'processing' || analyzing ? (
+                            <div className="flex flex-col items-center justify-center py-10 space-y-4">
+                                <div className="relative">
+                                    <Loader2 className="animate-spin h-10 w-10 text-indigo-600" />
+                                    <Brain className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 h-5 w-5 text-pink-500" />
+                                </div>
+                                <div className="text-center">
+                                    <div className="font-bold text-slate-900">AI is analyzing your encounter...</div>
+                                    <p className="text-sm text-slate-500">This may take a minute on CPU, but will be near-instant on M4 GPU.</p>
+                                </div>
+                                <Button variant="outline" size="sm" onClick={fetchData} className="mt-2">
+                                    Refresh Manually
+                                </Button>
                             </div>
-                        )}
-                        {analysis && (
+                        ) : analysis?.status === 'failed' ? (
+                            <div className="text-center py-6 space-y-4">
+                                <Alert variant="destructive" className="max-w-md mx-auto">
+                                    <AlertTriangle className="h-4 w-4" />
+                                    <AlertTitle>Analysis Failed</AlertTitle>
+                                    <AlertDescription>The background AI process encountered an error.</AlertDescription>
+                                </Alert>
+                                <Button onClick={runAnalysis} variant="outline">Retry Analysis</Button>
+                            </div>
+                        ) : null}
+
+                        {analysis?.status === 'completed' && (
                             <div className="space-y-6">
                                 {differential.map((diff: any, i: number) => (
                                     <div key={i} className="space-y-1">
