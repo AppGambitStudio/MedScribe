@@ -24,6 +24,11 @@ medgemma_analyzer = None # Keep for compatibility if needed, but we'll use model
 device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
 print(f"MedScribe AI: Detected device: {device}")
 
+# Simple in-memory task store for tracking background jobs
+tasks = {}
+import uuid
+from fastapi import BackgroundTasks
+
 @app.on_event("startup")
 async def load_models():
     global asr_pipeline, medgemma_model, medgemma_processor, medgemma_tokenizer
@@ -191,8 +196,66 @@ async def transcribe(file: UploadFile = File(...)):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
+async def run_medgemma_task(task_id: str, transcript: str, notes: str, clinical_images: list):
+    global tasks
+    try:
+        tasks[task_id]["status"] = "processing"
+        
+        # Prepare messages
+        prompt_text = (
+            f"Notes: {notes}\n"
+            f"Transcript: {transcript}\n\n"
+            "Clinical Analysis JSON (differential, plan, visualFindings):"
+        )
+        content = []
+        for img in clinical_images:
+            content.append({"type": "image", "image": img})
+        content.append({"type": "text", "text": prompt_text})
+        messages = [{"role": "user", "content": content}]
+
+        print(f"[AI Task {task_id}] Preparing inputs...", flush=True)
+        inputs = medgemma_processor.apply_chat_template(
+            messages, 
+            add_generation_prompt=True, 
+            tokenize=True,
+            return_dict=True, 
+            return_tensors="pt"
+        ).to(medgemma_model.device)
+        
+        from transformers import TextStreamer
+        streamer = TextStreamer(medgemma_tokenizer, skip_prompt=True)
+        
+        print(f"[AI Task {task_id}] Starting generation loop...", flush=True)
+        start_time = time.time()
+        with torch.inference_mode():
+            output_ids = medgemma_model.generate(
+                **inputs,
+                max_new_tokens=512,
+                do_sample=False,
+                streamer=streamer,
+                pad_token_id=medgemma_tokenizer.pad_token_id if medgemma_tokenizer.pad_token_id else medgemma_tokenizer.eos_token_id
+            )
+        elapsed = time.time() - start_time
+        
+        # Decode only the generated part
+        input_len = inputs["input_ids"].shape[-1]
+        generated_ids = output_ids[0][input_len:]
+        generated_text = medgemma_tokenizer.decode(generated_ids, skip_special_tokens=True)
+        
+        print(f"\n[AI Task {task_id}] Inference completed in {elapsed:.2f}s", flush=True)
+        
+        tasks[task_id]["status"] = "completed"
+        tasks[task_id]["result"] = {"response": generated_text}
+        
+    except Exception as e:
+        print(f"[AI Task {task_id}] Failed: {e}", flush=True)
+        traceback.print_exc()
+        tasks[task_id]["status"] = "failed"
+        tasks[task_id]["error"] = str(e)
+
 @app.post("/analyze-clinical")
 async def analyze_clinical(
+    background_tasks: BackgroundTasks,
     transcript: str = Form(""), 
     notes: str = Form(""), 
     files: list[UploadFile] = File([])
@@ -207,94 +270,43 @@ async def analyze_clinical(
     
     clinical_images = []
     
-    print(f"[DEBUG] Starting file processing loop for {len(files)} files...", flush=True)
+    # Process files into memory so we can background the task safely
     for file in files:
         content = await file.read()
         filename = file.filename.lower()
-        print(f"[DEBUG] Processing file: {filename}", flush=True)
-        
-        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(filename)[1]) as tmp:
-            tmp.write(content)
-            tmp_path = tmp.name
-            
         try:
             if filename.endswith(('.dcm', '.dicom')):
-                print(f"[DEBUG] Reading DICOM: {filename}", flush=True)
-                ds = pydicom.dcmread(tmp_path)
-                pixel_array = ds.pixel_array
-                pixel_array = pixel_array.astype(float)
-                pixel_array = (np.maximum(pixel_array, 0) / pixel_array.max()) * 255.0
-                img = Image.fromarray(np.uint8(pixel_array))
-                clinical_images.append(img)
+                with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(filename)[1]) as tmp:
+                    tmp.write(content)
+                    tmp_path = tmp.name
+                try:
+                    ds = pydicom.dcmread(tmp_path)
+                    pixel_array = ds.pixel_array.astype(float)
+                    pixel_array = (np.maximum(pixel_array, 0) / pixel_array.max()) * 255.0
+                    img = Image.fromarray(np.uint8(pixel_array))
+                    clinical_images.append(img)
+                finally:
+                    if os.path.exists(tmp_path): os.remove(tmp_path)
             else:
-                print(f"[DEBUG] Opening image: {filename}", flush=True)
                 img = Image.open(io.BytesIO(content))
                 clinical_images.append(img.convert("RGB"))
         except Exception as e:
             print(f"Error processing {filename}: {e}", flush=True)
-        finally:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
     
-    print(f"[DEBUG] File processing complete. images_found={len(clinical_images)}", flush=True)
+    task_id = str(uuid.uuid4())
+    tasks[task_id] = {"status": "pending", "result": None}
+    
+    # Offload the 40-minute generation to a background thread
+    background_tasks.add_task(run_medgemma_task, task_id, transcript, notes, clinical_images)
+    
+    print(f"[DEBUG] Background task {task_id} queued.", flush=True)
+    return {"task_id": task_id, "status": "queued"}
 
-    # Construct a very concise prompt to minimize pre-fill time on CPU
-    prompt_text = (
-        f"Notes: {notes}\n"
-        f"Transcript: {transcript}\n\n"
-        "Clinical Analysis JSON (differential, plan, visualFindings):"
-    )
-    
-    # Prepare messages for pipeline
-    content = []
-    for img in clinical_images:
-        content.append({"type": "image", "image": img})
-    content.append({"type": "text", "text": prompt_text})
-    
-    messages = [{"role": "user", "content": content}]
-    print(f"[DEBUG] Prompt prepared. Input length approximately {len(prompt_text)} chars.", flush=True)
-    
-    try:
-        print(f"[AI] Preparing inputs for MedGemma inference...", flush=True)
-        
-        # Use processor to prepare inputs following official example
-        inputs = medgemma_processor.apply_chat_template(
-            messages, 
-            add_generation_prompt=True, 
-            tokenize=True,
-            return_dict=True, 
-            return_tensors="pt"
-        ).to(medgemma_model.device)
-        
-        print(f"[AI] Starting MedGemma generation loop...", flush=True)
-        from transformers import TextStreamer
-        streamer = TextStreamer(medgemma_tokenizer, skip_prompt=True)
-        
-        start_time = time.time()
-        
-        # Using inference_mode as recommended in official documentation
-        with torch.inference_mode():
-            output_ids = medgemma_model.generate(
-                **inputs,
-                max_new_tokens=512,
-                do_sample=False,
-                streamer=streamer,
-                pad_token_id=medgemma_tokenizer.pad_token_id if medgemma_tokenizer.pad_token_id else medgemma_tokenizer.eos_token_id
-            )
-        
-        elapsed = time.time() - start_time
-        
-        # Decode only the generated part
-        input_len = inputs["input_ids"].shape[-1]
-        generated_ids = output_ids[0][input_len:]
-        generated_text = medgemma_tokenizer.decode(generated_ids, skip_special_tokens=True)
-        
-        print(f"\n[AI] Inference completed in {elapsed:.2f}s", flush=True)
-        return {"response": generated_text}
-    except Exception as e:
-        print(f"[AI] Inference failed: {e}", flush=True)
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+@app.get("/status/{task_id}")
+async def get_status(task_id: str):
+    if task_id not in tasks:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return tasks[task_id]
 
 @app.post("/convert-medical-image")
 async def convert_medical_image(file: UploadFile = File(...)):

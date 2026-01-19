@@ -53,56 +53,68 @@ export const aiService = {
         }
     },
 
-    async analyzeEncounter(encounterId: string, transcript: string, notes?: string, clinicalFilePaths: string[] = []): Promise<any> {
-        console.log(`[AI] Analyzing clinical encounter via Native MedGemma 1.5 Python Service...`);
-
+    async initiateAnalysis(transcript: string, notes?: string, clinicalFilePaths: string[] = []): Promise<string> {
+        console.log(`[AI] Initiating analysis task via Native MedGemma 1.5 Python Service...`);
         try {
             const formData = new FormData();
             formData.append('transcript', transcript);
             formData.append('notes', notes || "");
-
-            console.log(`[AI] Attaching ${clinicalFilePaths.length} files to FormData...`);
-            // Attach all clinical files directly
             for (const path of clinicalFilePaths) {
                 if (fs.existsSync(path)) {
-                    console.log(`[AI] Appending file: ${path}`);
                     formData.append('files', fs.createReadStream(path));
                 }
             }
-
-            console.log(`[AI] Sending request to http://localhost:8000/analyze-clinical...`);
             const response = await axios.post("http://localhost:8000/analyze-clinical", formData, {
                 headers: { ...formData.getHeaders() },
                 maxBodyLength: Infinity,
                 maxContentLength: Infinity,
-                timeout: 300000, // 5 minute timeout for slow CPUs
             });
-
-            console.log(`[AI] Response status: ${response.status}`);
-
-            const aiResponse = response.data.response;
-            console.log(`[AI] Native MedGemma Response received: ${aiResponse.substring(0, 100)}...`);
-
-            // Clean the response if it contains markdown code blocks
-            let jsonString = aiResponse.replace(/```json/g, "").replace(/```/g, "").trim();
-
-            const result = JSON.parse(jsonString);
-            return {
-                ...result,
-                visualFindings: [] // Findings are now integrated into the reasoning, no separate interpretation step needed
-            };
-
+            return response.data.task_id;
         } catch (error: any) {
-            console.error("[AI] Native Analysis failed:", error.message);
-            return {
-                differential: [{ condition: "Error: AI Service Unavailable", likelihood: "Low", evidence: ["Check python-service logs"] }],
-                plan: { diagnostics: [], therapeutics: [], monitoring: ["Ensure ai-service container is running"] }
-            };
+            console.error("[AI] Failed to initiate analysis:", error.message);
+            throw error;
         }
     },
 
+    async checkTaskStatus(taskId: string): Promise<any> {
+        try {
+            const response = await axios.get(`http://localhost:8000/status/${taskId}`);
+            return response.data;
+        } catch (error: any) {
+            console.error(`[AI] Failed to check status for task ${taskId}:`, error.message);
+            throw error;
+        }
+    },
+
+    async analyzeEncounter(encounterId: string, transcript: string, notes?: string, clinicalFilePaths: string[] = []): Promise<any> {
+        // This is now a "wrapper" that handles the polling internally if we still want a single-await call,
+        // but for the route background thread, we'll call initiate/poll directly.
+        // Keeping this for compatibility but we'll use the two-step process in the route.
+        const taskId = await this.initiateAnalysis(transcript, notes, clinicalFilePaths);
+
+        let completed = false;
+        let attempts = 0;
+        const maxAttempts = 240; // 240 * 10 seconds = 40 minutes
+
+        while (!completed && attempts < maxAttempts) {
+            attempts++;
+            await new Promise(r => setTimeout(r, 10000)); // Poll every 10s
+
+            const task = await this.checkTaskStatus(taskId);
+            if (task.status === 'completed') {
+                const aiResponse = task.result.response;
+                let jsonString = aiResponse.replace(/```json/g, "").replace(/```/g, "").trim();
+                return { ...JSON.parse(jsonString), visualFindings: [] };
+            } else if (task.status === 'failed') {
+                throw new Error(task.error || "AI generation failed");
+            }
+            console.log(`[AI] Task ${taskId} still ${task.status} (Attempt ${attempts}/${maxAttempts})...`);
+        }
+        throw new Error("Analysis timed out in background polling");
+    },
+
     async generateClinicalNote(transcript: string, notes: string, analysis: any, type: string = "SOAP Note"): Promise<string> {
-        console.log(`[AI] Generating ${type} via Native MedGemma 1.5 Python Service...`);
+        console.log(`[AI] Generating ${type} via Native MedGemma 1.5 Python Service Task Queue...`);
 
         try {
             const formData = new FormData();
@@ -122,7 +134,22 @@ export const aiService = {
                 headers: { ...formData.getHeaders() }
             });
 
-            return response.data.response;
+            const taskId = response.data.task_id;
+            let completed = false;
+            let attempts = 0;
+            const maxAttempts = 120; // 120 * 5s = 10 minutes (Notes are usually faster)
+
+            while (!completed && attempts < maxAttempts) {
+                attempts++;
+                await new Promise(r => setTimeout(r, 5000));
+                const task = await this.checkTaskStatus(taskId);
+                if (task.status === 'completed') {
+                    return task.result.response;
+                } else if (task.status === 'failed') {
+                    throw new Error(task.error || "AI generation failed");
+                }
+            }
+            throw new Error("Note generation timed out");
 
         } catch (error: any) {
             console.error("[AI] Note generation failed:", error.message);
