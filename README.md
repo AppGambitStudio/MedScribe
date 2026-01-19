@@ -2,6 +2,8 @@
 
 MedScribe is a local-first clinical assistant designed for HIPAA-compliant patient encounter analysis. It leverages the latest Google Gemma 3 family model, MedGemma 1.5 with MedASR, to analyze audio transcripts, clinical notes, and medical imaging (DICOM/X-ray) natively.
 
+[Google Research: Next generation medical image interpretation with MedGemma 1.5 and medical speech to text with MedASR](https://research.google/blog/next-generation-medical-image-interpretation-with-medgemma-15-and-medical-speech-to-text-with-medasr/)
+
 ## 🏗️ Architecture
 
 - **Frontend**: Next.js 15, Tailwind CSS, Shadcn UI.
