@@ -9,6 +9,9 @@ import tempfile
 import traceback
 from transformers import pipeline
 import time
+from dotenv import load_dotenv
+
+load_dotenv() # Load HF_TOKEN from .env file
 
 app = FastAPI()
 
@@ -203,9 +206,18 @@ async def run_medgemma_task(task_id: str, transcript: str, notes: str, clinical_
         
         # Prepare messages
         prompt_text = (
+            "SYSTEM: You are an expert clinical diagnostic assistant. "
+            "Examine the provided notes, transcript, and any images. "
+            "Generate a professional, structured Clinical Analysis Report in MARKDOWN format. "
+            "Include the following sections: "
+            "1. ## Differential Diagnosis (list conditions with likelihood and evidence) "
+            "2. ## Clinical Plan (include Diagnostics, Therapeutics, and Monitoring) "
+            "3. ## Visual Findings (interpretations of any provided images) "
+            "Do NOT include conversational filler or 'thinking' process tokens in the final output. "
+            "\n\nDATA:\n"
             f"Notes: {notes}\n"
             f"Transcript: {transcript}\n\n"
-            "Clinical Analysis JSON (differential, plan, visualFindings):"
+            "MARKDOWN REPORT:"
         )
         content = []
         for img in clinical_images:
@@ -242,6 +254,20 @@ async def run_medgemma_task(task_id: str, transcript: str, notes: str, clinical_
         generated_ids = output_ids[0][input_len:]
         generated_text = medgemma_tokenizer.decode(generated_ids, skip_special_tokens=True)
         
+        # Strip anything before the expected output header
+        header_marker = "MARKDOWN REPORT:"
+        if header_marker in generated_text:
+            generated_text = generated_text.split(header_marker)[-1].strip()
+        
+        # Fallback: Surgical Thought-Block Removal if header wasn't found or repeated
+        if "thought" in generated_text.lower()[:500]:
+            match = re.search(r'(^#+\s+|\n#+\s+)', generated_text)
+            if match:
+                generated_text = generated_text[match.start():].strip()
+            else:
+                generated_text = re.sub(r'(?i)<unused\d+>thought[\s\S]*?(?=#+|$)', '', generated_text).strip()
+                generated_text = re.sub(r'(?i)^thought[\s\S]*?(?=#+|$)', '', generated_text).strip()
+
         print(f"\n[AI Task {task_id}] Inference completed in {elapsed:.2f}s", flush=True)
         
         tasks[task_id]["status"] = "completed"
@@ -249,6 +275,81 @@ async def run_medgemma_task(task_id: str, transcript: str, notes: str, clinical_
         
     except Exception as e:
         print(f"[AI Task {task_id}] Failed: {e}", flush=True)
+        traceback.print_exc()
+        tasks[task_id]["status"] = "failed"
+        tasks[task_id]["error"] = str(e)
+
+async def run_medgemma_note_task(task_id: str, transcript: str, clinical_data: str, note_type: str):
+    global tasks
+    try:
+        tasks[task_id]["status"] = "processing"
+        
+        # Narrative Note-Specific Prompt
+        prompt_text = (
+            "SYSTEM: You are a professional medical scribe. "
+            f"Generate a detailed, formal {note_type} based on the provided clinical data. "
+            "The output should be a single, cohesive narrative formatted for a medical record. "
+            "Do NOT include structured headers for differential or plan unless they belong in the specific note format. "
+            "Do NOT include internal reasoning, thinking tokens, or conversational filler. "
+            "\n\nDATA:\n"
+            f"Transcript: {transcript}\n"
+            f"Clinical Analysis/Notes: {clinical_data}\n\n"
+            f"PROFESSIONAL {note_type.upper()}:"
+        )
+        
+        messages = [{"role": "user", "content": [{"type": "text", "text": prompt_text}]}]
+
+        print(f"[AI Note Task {task_id}] Preparing inputs for {note_type}...", flush=True)
+        inputs = medgemma_processor.apply_chat_template(
+            messages, 
+            add_generation_prompt=True, 
+            tokenize=True,
+            return_dict=True, 
+            return_tensors="pt"
+        ).to(medgemma_model.device)
+        
+        from transformers import TextStreamer
+        streamer = TextStreamer(medgemma_tokenizer, skip_prompt=True)
+        
+        print(f"[AI Note Task {task_id}] Starting generation loop...", flush=True)
+        start_time = time.time()
+        with torch.inference_mode():
+            output_ids = medgemma_model.generate(
+                **inputs,
+                max_new_tokens=2048, # Increased to avoid cutoffs
+                do_sample=False,
+                streamer=streamer,
+                pad_token_id=medgemma_tokenizer.pad_token_id if medgemma_tokenizer.pad_token_id else medgemma_tokenizer.eos_token_id
+            )
+        elapsed = time.time() - start_time
+        
+        # Decode only the generated part
+        input_len = inputs["input_ids"].shape[-1]
+        generated_ids = output_ids[0][input_len:]
+        generated_text = medgemma_tokenizer.decode(generated_ids, skip_special_tokens=True)
+        
+        # Strip anything before the expected output header
+        header_marker = f"PROFESSIONAL {note_type.upper()}:"
+        if header_marker in generated_text:
+            generated_text = generated_text.split(header_marker)[-1].strip()
+
+        # Fallback: Strip thought tokens if they still persist
+        import re
+        if "thought" in generated_text.lower()[:500]:
+            # Look for typical narrative starts if the marker failed
+            match = re.search(r'(^#+\s+|\n#+\s+|^[A-Z]:\s+|\n[A-Z]:\s+|^[A-Za-z]+\s*:\s+)', generated_text)
+            if match:
+                generated_text = generated_text[match.start():].strip()
+            else:
+                generated_text = generated_text.replace("thought", "").strip()
+
+        print(f"\n[AI Note Task {task_id}] Note generated in {elapsed:.2f}s", flush=True)
+        
+        tasks[task_id]["status"] = "completed"
+        tasks[task_id]["result"] = {"response": generated_text}
+        
+    except Exception as e:
+        print(f"[AI Note Task {task_id}] Failed: {e}", flush=True)
         traceback.print_exc()
         tasks[task_id]["status"] = "failed"
         tasks[task_id]["error"] = str(e)
@@ -300,6 +401,25 @@ async def analyze_clinical(
     background_tasks.add_task(run_medgemma_task, task_id, transcript, notes, clinical_images)
     
     print(f"[DEBUG] Background task {task_id} queued.", flush=True)
+    return {"task_id": task_id, "status": "queued"}
+
+@app.post("/generate-clinical-note")
+async def generate_clinical_note(
+    background_tasks: BackgroundTasks,
+    transcript: str = Form(""),
+    clinical_data: str = Form(""),
+    note_type: str = Form("SOAP Note")
+):
+    print(f"[DEBUG] /generate-clinical-note hit! type={note_type}", flush=True)
+    
+    if medgemma_model is None or medgemma_processor is None:
+        raise HTTPException(status_code=503, detail="MedGemma model not loaded.")
+    
+    task_id = str(uuid.uuid4())
+    tasks[task_id] = {"status": "pending", "result": None}
+    
+    background_tasks.add_task(run_medgemma_note_task, task_id, transcript, clinical_data, note_type)
+    
     return {"task_id": task_id, "status": "queued"}
 
 @app.get("/status/{task_id}")

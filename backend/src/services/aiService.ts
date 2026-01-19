@@ -102,9 +102,24 @@ export const aiService = {
 
             const task = await this.checkTaskStatus(taskId);
             if (task.status === 'completed') {
-                const aiResponse = task.result.response;
-                let jsonString = aiResponse.replace(/```json/g, "").replace(/```/g, "").trim();
-                return { ...JSON.parse(jsonString), visualFindings: [] };
+                let aiResponse = task.result.response;
+
+                // Final Safeguard: Strip any remaining reasoning tokens or thought blocks
+                // We find the first clinical header (# or S:) and strip everything before it if it contains "thought"
+                if (aiResponse.toLowerCase().includes("thought")) {
+                    const match = aiResponse.match(/(^#+\s+|\n#+\s+|^[A-Z]:\s+|\n[A-Z]:\s+)/);
+                    if (match) {
+                        aiResponse = aiResponse.substring(match.index!).trim();
+                    }
+                }
+
+                // For Markdown reports, we store the raw output
+                return {
+                    clinicalReport: aiResponse,
+                    differential: [], // Legacy fields
+                    plan: { diagnostics: [], therapeutics: [], monitoring: [] },
+                    visualFindings: []
+                };
             } else if (task.status === 'failed') {
                 throw new Error(task.error || "AI generation failed");
             }
@@ -119,18 +134,10 @@ export const aiService = {
         try {
             const formData = new FormData();
             formData.append('transcript', transcript);
-            formData.append('notes', `MISSION: Generate a professional ${type} based on the provided clinical data.
-            STRUCTURE:
-            S (Subjective): Summarize patient's complaints and history.
-            O (Objective): Summarize any visual findings or reported signs.
-            A (Assessment): Summarize conclusions.
-            P (Plan): Summarize the clinical plan.
+            formData.append('clinical_data', analysis.clinicalReport || "No report available.");
+            formData.append('note_type', type);
 
-            DATA:
-            Captured Notes: ${notes}
-            AI Clinical Analysis: ${JSON.stringify(analysis)}`);
-
-            const response = await axios.post("http://localhost:8000/analyze-clinical", formData, {
+            const response = await axios.post("http://localhost:8000/generate-clinical-note", formData, {
                 headers: { ...formData.getHeaders() }
             });
 

@@ -8,6 +8,7 @@ export class Analysis extends Model {
     public differential!: any; // JSON structure for differential
     public plan!: any; // JSON structure for plan
     public visualFindings?: string[]; // JSON structure for interpreted image findings
+    public clinicalReport?: string; // Unified Markdown report
     public status!: 'pending' | 'processing' | 'completed' | 'failed';
     public finalNote?: string;
     public createdAt!: Date;
@@ -44,6 +45,10 @@ Analysis.init(
             allowNull: false,
         },
         finalNote: {
+            type: DataTypes.TEXT,
+            allowNull: true,
+        },
+        clinicalReport: {
             type: DataTypes.TEXT,
             allowNull: true,
         },

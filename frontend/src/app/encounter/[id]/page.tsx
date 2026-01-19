@@ -17,6 +17,7 @@ import { Badge } from "@/components/ui/badge";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { Loader2, Copy, Download, FileText, Trash, Brain, ClipboardCheck, AlertTriangle, ImageIcon, FileIcon } from "lucide-react";
+import ReactMarkdown from 'react-markdown';
 
 export default function ReviewPage({ params }: { params: Promise<{ id: string }> }) {
     const router = useRouter();
@@ -28,6 +29,8 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
     const [loading, setLoading] = useState(true);
     const [analyzing, setAnalyzing] = useState(false);
     const [generatingNote, setGeneratingNote] = useState(false);
+    const [isEditing, setIsEditing] = useState(false);
+    const [saving, setSaving] = useState(false);
 
     // State for Review Steps
     const [planText, setPlanText] = useState("");
@@ -47,8 +50,7 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
             if (analysisRes.data) {
                 setAnalysis(analysisRes.data);
                 if (analysisRes.data.status === 'completed') {
-                    setDifferential(analysisRes.data.differential || []);
-                    setPlanText(JSON.stringify(analysisRes.data.plan, null, 2));
+                    setPlanText(analysisRes.data.clinicalReport || "");
                     setStep2Complete(true);
                 }
             }
@@ -77,8 +79,7 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
                     if (res.data) {
                         setAnalysis(res.data);
                         if (res.data.status === 'completed') {
-                            setDifferential(res.data.differential || []);
-                            setPlanText(JSON.stringify(res.data.plan, null, 2));
+                            setPlanText(res.data.clinicalReport || "");
                             setStep2Complete(true);
                             setAnalyzing(false);
                             toast.success("Analysis complete!");
@@ -104,8 +105,7 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
             const res = await api.post(`/analysis/${id}`);
             setAnalysis(res.data);
             if (res.data.status === 'completed') {
-                setDifferential(res.data.differential || []);
-                setPlanText(JSON.stringify(res.data.plan, null, 2));
+                setPlanText(res.data.clinicalReport || "");
                 toast.success("Analysis complete");
                 setStep2Complete(true);
                 setAnalyzing(false);
@@ -136,6 +136,22 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
     const handleCopy = () => {
         navigator.clipboard.writeText(finalNote);
         toast.success("Copied to clipboard");
+    };
+
+    const handleSaveReport = async () => {
+        setSaving(true);
+        try {
+            const res = await api.put(`/analysis/${id}`, {
+                clinicalReport: planText
+            });
+            setAnalysis(res.data);
+            setIsEditing(false);
+            toast.success("Clinical report updated successfully");
+        } catch (error) {
+            toast.error("Failed to save changes");
+        } finally {
+            setSaving(false);
+        }
     };
 
     const getFileUrl = (path: string) => {
@@ -274,8 +290,19 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
                 )}
 
                 <Card className="border-slate-200 shadow-sm">
-                    <CardHeader className="bg-slate-50 border-b pb-4">
-                        <CardTitle className="text-indigo-700 text-lg uppercase tracking-wide text-sm font-bold">Differential Diagnosis</CardTitle>
+                    <CardHeader className="bg-slate-50 border-b pb-4 flex flex-row items-center justify-between">
+                        <CardTitle className="text-indigo-700 text-lg uppercase tracking-wide text-sm font-bold">Clinical Analysis Report</CardTitle>
+                        {analysis?.status === 'completed' && !isEditing && (
+                            <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => setIsEditing(true)}
+                                className="h-8 gap-2 border-indigo-200 text-indigo-700 hover:bg-indigo-50"
+                            >
+                                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" /><path d="m15 5 4 4" /></svg>
+                                Edit Report
+                            </Button>
+                        )}
                     </CardHeader>
                     <CardContent className="pt-6">
                         {!analysis && !analyzing && (
@@ -311,44 +338,55 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
                         ) : null}
 
                         {analysis?.status === 'completed' && (
-                            <div className="space-y-6">
-                                {differential.map((diff: any, i: number) => (
-                                    <div key={i} className="space-y-1">
-                                        <div className="font-semibold text-slate-900 text-lg">
-                                            {i + 1}. {diff.condition}
-                                        </div>
-                                        <div className="pl-4 text-slate-700 leading-relaxed">
-                                            <span className="font-bold text-slate-900">• Supporting Evidence: </span>
-                                            {Array.isArray(diff.evidence) ? diff.evidence.join(", ") : "Evidence not available."}
-                                        </div>
-                                        <div className="pl-4 text-slate-600">
-                                            <span className="font-bold text-slate-900">• Confidence Level: </span>
-                                            {diff.likelihood}
-                                        </div>
+                            isEditing ? (
+                                <div className="space-y-4">
+                                    <Textarea
+                                        value={planText}
+                                        onChange={(e) => setPlanText(e.target.value)}
+                                        className="min-h-[400px] font-mono text-sm leading-relaxed"
+                                        placeholder="Edit the clinical report here..."
+                                    />
+                                    <div className="flex justify-end gap-2">
+                                        <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            onClick={() => {
+                                                setPlanText(analysis.clinicalReport || "");
+                                                setIsEditing(false);
+                                            }}
+                                        >
+                                            Cancel
+                                        </Button>
+                                        <Button
+                                            size="sm"
+                                            onClick={handleSaveReport}
+                                            disabled={saving}
+                                            className="bg-indigo-600"
+                                        >
+                                            {saving ? "Saving..." : "Save Changes"}
+                                        </Button>
                                     </div>
-                                ))}
-                            </div>
+                                </div>
+                            ) : (
+                                <div className="prose prose-slate max-w-none">
+                                    <ReactMarkdown
+                                        components={{
+                                            h2: ({ node, ...props }) => <h2 className="text-xl font-bold text-slate-900 mt-6 mb-2 border-b pb-1" {...props} />,
+                                            h3: ({ node, ...props }) => <h3 className="text-lg font-semibold text-slate-800 mt-4 mb-2" {...props} />,
+                                            p: ({ node, ...props }) => <p className="text-slate-700 leading-relaxed mb-4" {...props} />,
+                                            ul: ({ node, ...props }) => <ul className="list-disc pl-5 space-y-2 mb-4" {...props} />,
+                                            li: ({ node, ...props }) => <li className="text-slate-700" {...props} />,
+                                        }}
+                                    >
+                                        {analysis.clinicalReport}
+                                    </ReactMarkdown>
+                                </div>
+                            )
                         )}
                     </CardContent>
                 </Card>
 
-                {/* Plan Review Section */}
-                {analysis && (
-                    <div className="bg-green-50 border border-green-200 rounded-lg overflow-hidden">
-                        <div className="bg-green-100 px-4 py-2 border-b border-green-200 flex items-center gap-2 font-bold text-green-800">
-                            <ClipboardCheck className="h-5 w-5" />
-                            Review & Edit Plan
-                        </div>
-                        <div className="p-4">
-                            <p className="text-sm text-green-800 mb-2">Edit the assessment and plan below, then approve to generate the final note:</p>
-                            <Textarea
-                                value={planText}
-                                onChange={(e) => setPlanText(e.target.value)}
-                                className="bg-white font-mono text-sm min-h-[150px]"
-                            />
-                        </div>
-                    </div>
-                )}
+                {/* Removed legacy Plan Review Section as it is now integrated into the main analysis card */}
             </section>
 
             {/* Step 3: Final Note */}

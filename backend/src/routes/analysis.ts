@@ -59,6 +59,7 @@ router.post('/:encounterId', async (req, res) => {
                 analysis!.differential = result.differential;
                 analysis!.plan = result.plan;
                 analysis!.visualFindings = result.visualFindings;
+                analysis!.clinicalReport = result.clinicalReport;
                 analysis!.status = 'completed';
                 await analysis!.save();
 
@@ -94,6 +95,25 @@ router.get('/:encounterId', async (req, res) => {
         res.json(analysis);
     } catch (e) {
         res.status(500).json({ error: 'Failed to fetch analysis' });
+    }
+});
+
+// Update Analysis (Manually by Clinician)
+router.put('/:encounterId', async (req, res) => {
+    try {
+        const { encounterId } = req.params;
+        const { clinicalReport } = req.body;
+
+        const analysis = await Analysis.findOne({ where: { encounterId } });
+        if (!analysis) return res.status(404).json({ error: 'Analysis not found' });
+
+        analysis.clinicalReport = clinicalReport;
+        await analysis.save();
+
+        res.json(analysis);
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: 'Failed to update analysis' });
     }
 });
 

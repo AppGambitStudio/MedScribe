@@ -13,3 +13,4 @@ numpy
 huggingface-hub
 sentencepiece
 protobuf
+python-dotenv
